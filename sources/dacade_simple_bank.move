@@ -1,9 +1,13 @@
 module yoy::dacade_simple_bank {
+    use std::option::Option;
     use sui::sui::SUI;
     use sui::vec_map::{Self, VecMap};
     use sui::vec_set::{Self, VecSet};
     use sui::coin::{Self, Coin};
     use sui::balance::Balance;
+    use sui::transfer;
+    use sui::tx_context::{Self, TxContext};
+    use sui::object::{Self, UID};
     use sui::event;
 
     // ===> ErrorCodes <===
@@ -17,59 +21,63 @@ module yoy::dacade_simple_bank {
     const ENotExistedRegistered: u64 = 8;
 
     // ===> Structures <===
-    public struct AdminCap has key {
+    struct AdminCap has key {
         id: UID,
     }
 
-    public struct SimpleBank has key {
+    struct SimpleBank has key {
         id: UID,
         balances: VecMap<address, Balance<SUI>>,
         registeringUserSet: VecSet<address>,
         registeredUserSet: VecSet<address>,
     }
 
-    public fun get_registering_user_set(simpleBank: &SimpleBank): &VecSet<address> {
-        &simpleBank.registeringUserSet
-    }
-
-    public fun get_registered_user_set(simpleBank: &SimpleBank): &VecSet<address> {
-        &simpleBank.registeredUserSet
-    }
-
-    public fun get_balances(simpleBank: &SimpleBank): &VecMap<address, Balance<SUI>> {
-        &simpleBank.balances
-    }
-
-
     // ===> Events <===
-    public struct EventRegister has copy, drop {
+    struct EventRegister has copy, drop {
         sender: address,
     }
 
-    public struct EventApprove has copy, drop {
+    struct EventApprove has copy, drop {
         sender: address,
     }
 
-    public struct EventDeposit has copy, drop {
-        sender: address,
-        amount: u64,
-        balance: u64
-    }
-
-    public struct EventWithdraw has copy, drop {
+    struct EventDeposit has copy, drop {
         sender: address,
         amount: u64,
         balance: u64
     }
 
-    public struct EventTransfer has copy, drop {
+    struct EventWithdraw has copy, drop {
+        sender: address,
+        amount: u64,
+        balance: u64
+    }
+
+    struct EventTransfer has copy, drop {
         recipient: address,
         amount: u64,
         balance: u64
     }
 
-    // ===> Functions <===
-    fun init(ctx: &mut TxContext) {
+    // ===> Public Functions <===
+
+    /// Get the registering user set from the SimpleBank
+    public fun get_registering_user_set(simpleBank: &SimpleBank): &VecSet<address> {
+        &simpleBank.registeringUserSet
+    }
+
+    /// Get the registered user set from the SimpleBank
+    public fun get_registered_user_set(simpleBank: &SimpleBank): &VecSet<address> {
+        &simpleBank.registeredUserSet
+    }
+
+    /// Get the balances map from the SimpleBank
+    public fun get_balances(simpleBank: &SimpleBank): &VecMap<address, Balance<SUI>> {
+        &simpleBank.balances
+    }
+
+    /// Initialize the SimpleBank and create an AdminCap
+    public entry fun init(ctx: &mut TxContext) {
         transfer::share_object(
             SimpleBank {
                 id: object::new(ctx),
@@ -79,16 +87,13 @@ module yoy::dacade_simple_bank {
             }
         );
 
-        transfer::transfer(AdminCap{
+        transfer::transfer(AdminCap {
             id: object::new(ctx)
-         }, tx_context::sender(ctx));
+        }, tx_context::sender(ctx));
     }
 
-    // register me in the bank
-    public entry fun register (
-        simpleBank: &mut SimpleBank, 
-        ctx: &mut TxContext) {
-
+    /// Register a new user in the SimpleBank
+    public entry fun register(simpleBank: &mut SimpleBank, ctx: &mut TxContext) {
         let sender = tx_context::sender(ctx);
 
         // Check if sender is already registered or registering
@@ -96,50 +101,37 @@ module yoy::dacade_simple_bank {
         assert!(!simpleBank.registeredUserSet.contains(&sender), EAlreadyRegistered);
 
         // Add sender to registeringUserSet
-        simpleBank.registeringUserSet.insert(sender);
+        vec_set::insert(&mut simpleBank.registeringUserSet, sender);
 
-        // emit EventRegister event
-        event::emit(EventRegister{
-            sender
-        });
+        // Emit EventRegister event
+        event::emit(EventRegister { sender });
     }
 
-    // approve a new user by admin
-    public entry fun approve (
-        _: &AdminCap,  
-        simpleBank: &mut SimpleBank, 
-        users: vector<address>) {
+    /// Approve a list of users by the admin
+    public entry fun approve(_: &AdminCap, simpleBank: &mut SimpleBank, users: vector<address>) {
+        let users_length = vector::length(&users);
+        assert!(users_length > 0, EEmptyUsers);
 
-        let users_length = users.length();
-        assert!(users_length > 0, EEmptyUsers); 
-
-        let mut i = 0_u64;
-
+        let i = 0;
         while (i < users_length) {
+            let user = vector::borrow(&users, i);
 
-            // user should in registering list
-            assert!(simpleBank.registeringUserSet.contains(&users[i]), ENotExistedRegistering);
+            // User should be in the registering list
+            assert!(vec_set::contains(&simpleBank.registeringUserSet, user), ENotExistedRegistering);
 
-            if (!simpleBank.registeredUserSet.contains(&users[i])) {
-                simpleBank.registeredUserSet.insert(users[i]);
-
-                event::emit(EventApprove{
-                    sender: users[i]
-                });
+            if (!vec_set::contains(&simpleBank.registeredUserSet, user)) {
+                vec_set::insert(&mut simpleBank.registeredUserSet, *user);
+                event::emit(EventApprove { sender: *user });
             };
 
-            simpleBank.registeringUserSet.remove(&users[i]);
+            vec_set::remove(&mut simpleBank.registeringUserSet, user);
 
-            i = i+1;
+            i = i + 1;
         };
     }
 
-    // deposit coin to the bank
-    public entry fun deposit (
-        simpleBank: &mut SimpleBank, 
-        amount: &mut Coin<SUI>, 
-        ctx: &mut TxContext) {
-
+    /// Deposit coins to the SimpleBank
+    public entry fun deposit(simpleBank: &mut SimpleBank, amount: &mut Coin<SUI>, ctx: &mut TxContext) {
         let sender = tx_context::sender(ctx);
 
         check_auth(simpleBank, sender);
@@ -151,27 +143,23 @@ module yoy::dacade_simple_bank {
 
         let totalBalance;
 
-        if ( vec_map::contains(&simpleBank.balances, &sender) ) {
-            let myBalance = simpleBank.balances.get_mut(&sender);
-            totalBalance = myBalance.join(coin::into_balance(paid));
+        if (vec_map::contains(&simpleBank.balances, &sender)) {
+            let myBalance = vec_map::get_mut(&mut simpleBank.balances, &sender);
+            totalBalance = balance::join(myBalance, coin::into_balance(paid));
         } else {
-            simpleBank.balances.insert(sender, coin::into_balance(paid));
+            vec_map::insert(&mut simpleBank.balances, sender, coin::into_balance(paid));
             totalBalance = value;
         };
 
-        event::emit(EventDeposit{
+        event::emit(EventDeposit {
             sender,
             amount: value,
             balance: totalBalance
         });
     }
 
-    // withdraw coin from the bank
-    public entry fun withdraw (
-        simpleBank: &mut SimpleBank, 
-        amount: u64, 
-        ctx: &mut TxContext) {
-
+    /// Withdraw coins from the SimpleBank
+    public entry fun withdraw(simpleBank: &mut SimpleBank, amount: u64, ctx: &mut TxContext) {
         let sender = tx_context::sender(ctx);
 
         check_auth(simpleBank, sender);
@@ -180,28 +168,24 @@ module yoy::dacade_simple_bank {
 
         assert!(vec_map::contains(&simpleBank.balances, &sender), ENotExistedToken);
 
-        let myBalance = simpleBank.balances.get(&sender);
-        assert!(myBalance.value() >= amount, EInsufficientBalance);
+        let myBalance = vec_map::get(&simpleBank.balances, &sender);
+        assert!(balance::value(myBalance) >= amount, EInsufficientBalance);
 
-        let myBalance = simpleBank.balances.get_mut(&sender);
-        let withdrawBalance = myBalance.split(amount);
+        let myBalance = vec_map::get_mut(&mut simpleBank.balances, &sender);
+        let withdrawBalance = balance::split(myBalance, amount);
 
         let takeCoin = coin::from_balance(withdrawBalance, ctx);
         transfer::public_transfer(takeCoin, sender);
 
-        event::emit(EventWithdraw{
+        event::emit(EventWithdraw {
             sender,
             amount,
-            balance: myBalance.value() 
+            balance: balance::value(myBalance)
         });
     }
 
-    public entry fun transfer (
-        simpleBank: &mut SimpleBank, 
-        amount: u64, 
-        recipient: address, 
-        ctx: &mut TxContext) {
-
+    /// Transfer coins from the sender's account to a recipient
+    public entry fun transfer(simpleBank: &mut SimpleBank, amount: u64, recipient: address, ctx: &mut TxContext) {
         let sender = tx_context::sender(ctx);
 
         check_auth(simpleBank, sender);
@@ -210,28 +194,53 @@ module yoy::dacade_simple_bank {
 
         assert!(vec_map::contains(&simpleBank.balances, &sender), ENotExistedToken);
 
-        let myBalance = simpleBank.balances.get(&sender);
-        assert!(myBalance.value() >= amount, EInsufficientBalance);
+        let myBalance = vec_map::get(&simpleBank.balances, &sender);
+        assert!(balance::value(myBalance) >= amount, EInsufficientBalance);
 
-        let myBalance = simpleBank.balances.get_mut(&sender);
-        let withdrawBalance = myBalance.split(amount);
+        let myBalance = vec_map::get_mut(&mut simpleBank.balances, &sender);
+        let withdrawBalance = balance::split(myBalance, amount);
 
         let takeCoin = coin::from_balance(withdrawBalance, ctx);
         transfer::public_transfer(takeCoin, recipient);
 
-        event::emit(EventTransfer{
+        event::emit(EventTransfer {
             recipient,
             amount,
-            balance: myBalance.value()
+            balance: balance::value(myBalance)
         });
     }
 
-    fun check_auth(simpleBank: &SimpleBank, user: address) {
-        assert!(simpleBank.registeredUserSet.contains(&user), ENotExistedRegistered);
+    /// Check if a user is authorized (registered)
+   fun check_auth(simpleBank: &SimpleBank, user: address) {
+    assert!(vec_set::contains(&simpleBank.registeredUserSet, &user), ENotExistedRegistered);
     }
 
+    // ===> Admin Functions <===
+
+    /// Get the balance of a registered user
+    public fun get_user_balance(simpleBank: &SimpleBank, user: address): Option<u64> {
+        if (vec_set::contains(&simpleBank.registeredUserSet, &user) &&
+            vec_map::contains(&simpleBank.balances, &user)) {
+            let balance = vec_map::get(&simpleBank.balances, &user);
+            some(balance::value(balance))
+        } else {
+            none()
+        }
+    }
+
+    /// Get the total balance of the SimpleBank
+    public fun get_total_balance(simpleBank: &SimpleBank): u64 {
+        let total = 0;
+        let iter = vec_map::iter(&simpleBank.balances);
+        loop {
+            let (_, balance) = vec_map::next(&mut iter);
+            if (balance == vec_map::end(&simpleBank.balances)) break;
+            total = total + balance::value(balance);
+        }
+        total
+    }
+}
     #[test_only]
     public fun test_init(ctx: &mut TxContext) {
         init(ctx)
     }
-}
